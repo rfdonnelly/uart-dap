@@ -1,9 +1,8 @@
 use clap::Parser;
-use futures::stream::StreamExt;
-use futures::SinkExt;
-use tokio::sync::{broadcast, oneshot};
+use futures::{Sink, SinkExt, Stream, StreamExt};
+use tokio::sync::{broadcast, mpsc};
 use tokio_serial::SerialPortBuilderExt;
-use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
+use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
 use tracing::{error, info};
 use tracing_subscriber;
 
@@ -34,19 +33,21 @@ async fn main() -> Result<()> {
     let (command_tx, mut command_rx0) = broadcast::channel(2);
     let mut command_rx1 = command_tx.subscribe();
 
-    let (response_tx, mut response_rx) = oneshot::channel();
+    let (response_tx, mut response_rx) = mpsc::channel(1);
 
-    tokio::join! {
+    tokio::try_join! {
         process_stdin(command_tx),
         process_serial_tx(command_rx0, serial_writer),
         process_serial_rx(serial_reader, response_tx),
         process_serial_buffer(&mut command_rx1, &mut response_rx),
-    };
+    }?;
 
     Ok(())
 }
 
-async fn process_stdin(command_tx: broadcast::Sender<String>) {
+async fn process_stdin(command_tx: broadcast::Sender<String>) -> Result<()> {
+    info!("started");
+
     let stdin = tokio::io::stdin();
     let mut reader = FramedRead::new(stdin, LinesCodec::new());
 
@@ -54,26 +55,56 @@ async fn process_stdin(command_tx: broadcast::Sender<String>) {
         match result {
             Ok(line) => {
                 info!(?line);
-                command_tx.send(line).unwrap();
+                command_tx.send(line)?;
             }
             Err(e) => {
                 error!(?e);
             }
         }
     }
+
+    Ok(())
 }
 
-async fn process_serial_tx(command_rx: broadcast::Receiver<String>, writer: impl SinkExt<String>) {
+async fn process_serial_tx(
+    mut command_rx: broadcast::Receiver<String>,
+    mut writer: impl Sink<String> + Unpin,
+) -> Result<()> {
+    info!("started");
+
+    loop {
+        let command = command_rx.recv().await?;
+        writer
+            .send(command)
+            .await
+            .map_err(|_| Error::from("could not send"))?;
+    }
+
+    Ok(())
 }
 
-async fn process_serial_rx(reader: impl StreamExt, response_tx: oneshot::Sender<String>) {
+async fn process_serial_rx(
+    mut reader: impl Stream<Item = core::result::Result<String, LinesCodecError>> + Unpin,
+    mut response_tx: mpsc::Sender<String>,
+) -> Result<()> {
+    info!("started");
+
+    while let Some(result) = reader.next().await {
+        match result {
+            Ok(line) => {
+                info!(?line);
+                response_tx.send(line).await?;
+            }
+            Err(e) => {
+                error!(?e);
+            }
+        }
+    }
+
+    Ok(())
 }
 
-enum LineType {
-    Command(String),
-    Response(String),
-}
-
+#[derive(Debug, Clone)]
 enum BufferState {
     WaitForCommand,
     WaitForResponse(String),
@@ -81,32 +112,38 @@ enum BufferState {
 
 async fn process_serial_buffer(
     command_rx: &mut broadcast::Receiver<String>,
-    response_rx: &mut oneshot::Receiver<String>,
-) {
+    response_rx: &mut mpsc::Receiver<String>,
+) -> Result<()> {
     let mut state = BufferState::WaitForCommand;
 
+    info!("started");
+
     loop {
-        let line = tokio::select!{
-            line = command_rx.recv() => LineType::Command(line.unwrap()),
-            line = (&mut *response_rx) => LineType::Response(line.unwrap()),
+        let line = tokio::select! {
+            line = command_rx.recv() => line?,
+            line = response_rx.recv() => line.ok_or_else(|| Error::from("channel closed"))?,
         };
 
-        match line {
-            LineType::Command(command) => {
-                info!(?command);
-                if command.starts_with("rd ") {
-                    state = BufferState::WaitForResponse(command);
-                }
-            }
-            LineType::Response(response) => {
-                if let BufferState::WaitForResponse(command) = state {
-                    state = BufferState::WaitForCommand;
-                    info!(?command, ?response);
-                }
-            }
-        }
-    }
+        let next_state = if let BufferState::WaitForResponse(ref command) = state {
+            BufferState::WaitForCommand
+        } else if line.starts_with("rd ") {
+            BufferState::WaitForResponse(line.clone())
+        } else {
+            state.clone()
+        };
 
+        info!(?state, ?next_state, ?line);
+
+        state = next_state;
+    }
+}
+
+async fn process_write_command(command: &str) {
+    info!(?command);
+}
+
+async fn process_read_command(command: &str, response: &str) {
+    info!(?command, ?response);
 }
 
 #[cfg(test)]
