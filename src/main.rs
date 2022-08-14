@@ -22,7 +22,11 @@ type Result<T> = std::result::Result<T, Error>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    let subscriber = tracing_subscriber::fmt()
+        .compact()
+        .with_target(false)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)?;
 
     let args = Args::parse();
 
@@ -32,23 +36,23 @@ async fn main() -> Result<()> {
     let serial_writer = FramedWrite::new(serial_tx_port, LinesCodec::new());
     let serial_reader = FramedRead::new(serial_rx_port, LinesCodec::new());
 
-    let (command_tx, command_rx0) = broadcast::channel(2);
-    let mut command_rx1 = command_tx.subscribe();
+    let (app_command_tx, app_command_rx0) = broadcast::channel(2);
+    let mut app_command_rx1 = app_command_tx.subscribe();
 
-    let (response_tx, mut response_rx) = mpsc::channel(1);
+    let (serial_forward_tx, mut serial_forward_rx) = mpsc::channel(1);
 
-    tokio::try_join! {
-        process_stdin(command_tx),
-        process_serial_tx(command_rx0, serial_writer),
-        process_serial_rx(serial_reader, response_tx),
-        process_serial_buffer(&mut command_rx1, &mut response_rx),
+    tokio::select! {
+        result = process_commands(app_command_tx) => result,
+        result = process_serial_tx(app_command_rx0, serial_writer) => result,
+        result = process_serial_rx(serial_reader, serial_forward_tx) => result,
+        result = process_serial_buffer(&mut app_command_rx1, &mut serial_forward_rx) => result,
     }?;
 
     Ok(())
 }
 
 #[tracing::instrument(skip_all)]
-async fn process_stdin(command_tx: broadcast::Sender<String>) -> Result<()> {
+async fn process_commands(app_command_tx: broadcast::Sender<String>) -> Result<()> {
     info!("started");
 
     let stdin = tokio::io::stdin();
@@ -58,7 +62,7 @@ async fn process_stdin(command_tx: broadcast::Sender<String>) -> Result<()> {
         match result {
             Ok(line) => {
                 info!(?line);
-                command_tx.send(line)?;
+                app_command_tx.send(line)?;
             }
             Err(e) => {
                 error!(?e);
@@ -71,13 +75,13 @@ async fn process_stdin(command_tx: broadcast::Sender<String>) -> Result<()> {
 
 #[tracing::instrument(skip_all)]
 async fn process_serial_tx(
-    mut command_rx: broadcast::Receiver<String>,
+    mut app_command_rx: broadcast::Receiver<String>,
     mut writer: impl Sink<String> + Unpin,
 ) -> Result<()> {
     info!("started");
 
     loop {
-        let command = command_rx.recv().await?;
+        let command = app_command_rx.recv().await?;
         writer
             .send(command)
             .await
@@ -88,7 +92,7 @@ async fn process_serial_tx(
 #[tracing::instrument(skip_all)]
 async fn process_serial_rx(
     mut reader: impl Stream<Item = core::result::Result<String, LinesCodecError>> + Unpin,
-    response_tx: mpsc::Sender<String>,
+    serial_forward_tx: mpsc::Sender<String>,
 ) -> Result<()> {
     info!("started");
 
@@ -96,7 +100,7 @@ async fn process_serial_rx(
         match result {
             Ok(line) => {
                 info!(?line, "forwarding");
-                response_tx.send(line).await?;
+                serial_forward_tx.send(line).await?;
             }
             Err(e) => {
                 error!(?e);
@@ -142,8 +146,8 @@ impl FromStr for Command {
 
 #[tracing::instrument(skip_all)]
 async fn process_serial_buffer(
-    command_rx: &mut broadcast::Receiver<String>,
-    response_rx: &mut mpsc::Receiver<String>,
+    app_command_rx: &mut broadcast::Receiver<String>,
+    serial_forward_rx: &mut mpsc::Receiver<String>,
 ) -> Result<()> {
     let mut state = BufferState::WaitForCommand;
 
@@ -151,8 +155,8 @@ async fn process_serial_buffer(
 
     loop {
         let line = tokio::select! {
-            line = command_rx.recv() => line?,
-            line = response_rx.recv() => line.ok_or_else(|| Error::from("channel closed"))?,
+            line = app_command_rx.recv() => line?,
+            line = serial_forward_rx.recv() => line.ok_or_else(|| Error::from("channel closed"))?,
         };
 
         let command = Command::from_str(&line).ok();
