@@ -45,6 +45,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+#[tracing::instrument(skip_all)]
 async fn process_stdin(command_tx: broadcast::Sender<String>) -> Result<()> {
     info!("started");
 
@@ -66,6 +67,7 @@ async fn process_stdin(command_tx: broadcast::Sender<String>) -> Result<()> {
     Ok(())
 }
 
+#[tracing::instrument(skip_all)]
 async fn process_serial_tx(
     mut command_rx: broadcast::Receiver<String>,
     mut writer: impl Sink<String> + Unpin,
@@ -83,6 +85,7 @@ async fn process_serial_tx(
     Ok(())
 }
 
+#[tracing::instrument(skip_all)]
 async fn process_serial_rx(
     mut reader: impl Stream<Item = core::result::Result<String, LinesCodecError>> + Unpin,
     mut response_tx: mpsc::Sender<String>,
@@ -110,6 +113,7 @@ enum BufferState {
     WaitForResponse(String),
 }
 
+#[tracing::instrument(skip_all)]
 async fn process_serial_buffer(
     command_rx: &mut broadcast::Receiver<String>,
     response_rx: &mut mpsc::Receiver<String>,
@@ -138,10 +142,12 @@ async fn process_serial_buffer(
     }
 }
 
+#[tracing::instrument]
 async fn process_write_command(command: &str) {
     info!(?command);
 }
 
+#[tracing::instrument]
 async fn process_read_command(command: &str, response: &str) {
     info!(?command, ?response);
 }
