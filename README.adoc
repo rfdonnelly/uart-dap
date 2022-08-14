@@ -1,0 +1,31 @@
+= Proof of Concept for Serial Device Communication
+
+
+== Testing
+
+=== Create Two Virtual Serial Ports
+
+ socat -d -d -v pty,link=ttyS0,raw,echo=0 pty,link=ttyS1,raw,echo=0
+
+=== Start the Model
+
+ git clone https://github.com/rfdonnelly/serial-model
+ cd serial-model
+ cargo run -- ../ttyS1
+
+=== Start the POC
+
+ cargo run -- ttyS0
+
+=== Enter Commands
+
+The following commands can be entered into the terminal to send to the model.
+
+`exit`::
+Terminates the model.
+
+`rd <addr>`::
+Read a memory location.
+
+`wr <addr> <data>`::
+Write a memory location.
