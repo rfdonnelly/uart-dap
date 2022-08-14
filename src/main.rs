@@ -110,48 +110,32 @@ async fn process_serial_rx(
 #[derive(Debug, Clone)]
 enum BufferState {
     WaitForCommand,
-    WaitForResponse(ReadCommand),
+    WaitForResponse(Command),
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ReadCommand {
-    addr: u32,
+enum Command {
+    Read { addr: u32 },
+    Write { addr: u32, data: u32 },
 }
 
-impl FromStr for ReadCommand {
+impl FromStr for Command {
     type Err = Error;
 
     fn from_str(s: &str) -> ::std::result::Result<Self, Self::Err> {
-        let (command, args) = s.split_once(char::is_whitespace).ok_or_else(|| Error::from("not a command"))?;
+        let (command, args) = s.split_once(char::is_whitespace).ok_or_else(|| Error::from("unrecognized command"))?;
         match command {
             "rd" => {
                 let addr = parse_based_int(args)?;
-                Ok(Self { addr })
+                Ok(Self::Read { addr })
             }
-            _ => Err(format!("failed to parse command from '{s}'"))?
-         }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct WriteCommand {
-    addr: u32,
-    data: u32,
-}
-
-impl FromStr for WriteCommand {
-    type Err = Error;
-
-    fn from_str(s: &str) -> ::std::result::Result<Self, Self::Err> {
-        let (command, args) = s.split_once(char::is_whitespace).ok_or_else(|| Error::from("not a command"))?;
-        match command {
             "wr" => {
                 let (addr, data) = args.split_once(char::is_whitespace).ok_or_else(|| Error::from("expected 2 arguments"))?;
                 let addr = parse_based_int(&addr)?;
                 let data = parse_based_int(&data)?;
-                Ok(Self { addr, data })
+                Ok(Self::Write { addr, data })
             }
-            _ => Err(format!("failed to parse command from '{s}'"))?
+            _ => Err("unrecognized command")?
          }
     }
 }
@@ -166,33 +150,29 @@ async fn process_serial_buffer(
     info!("started");
 
     loop {
-        info!("waiting on select");
         let line = tokio::select! {
             line = command_rx.recv() => line?,
             line = response_rx.recv() => line.ok_or_else(|| Error::from("channel closed"))?,
         };
-        info!(?line, "done waiting on select");
 
-        if let BufferState::WaitForResponse(ref command) = state {
-            info!(?state, ?command);
-            let data = parse_based_int(&line)?;
-            process_read_command(command.addr, data).await;
-        } else if line.starts_with("wr ") {
-            let command = WriteCommand::from_str(&line)?;
-            process_write_command(command.addr, command.data).await;
-        }
+        let command = Command::from_str(&line).ok();
 
         let next_state = if let BufferState::WaitForResponse(_) = state {
             BufferState::WaitForCommand
-        } else if line.starts_with("rd ") {
-            let command = ReadCommand::from_str(&line)?;
-            BufferState::WaitForResponse(command)
+        } else if let Some(Command::Read { .. }) = command {
+            BufferState::WaitForResponse(command.unwrap())
         } else {
             state.clone()
         };
-        info!("done next_state processing");
 
         info!(?state, ?next_state, ?line);
+
+        if let BufferState::WaitForResponse(Command::Read { addr }) = state {
+            let data = parse_based_int(&line)?;
+            process_read_command(addr, data).await;
+        } else if let Some(Command::Write { addr, data }) = command {
+            process_write_command(addr, data).await;
+        }
 
         state = next_state;
     }
