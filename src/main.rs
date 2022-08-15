@@ -1,4 +1,4 @@
-use serial_poc::{UartDap, Command, Event, Result};
+use uart_dap::{UartDap, Command, Event, Result};
 
 use std::str::FromStr;
 
