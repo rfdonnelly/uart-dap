@@ -1,3 +1,4 @@
+use std::fmt;
 use std::str::FromStr;
 
 use futures::{Sink, SinkExt, Stream, StreamExt};
@@ -9,6 +10,18 @@ use tracing::{error, info};
 
 pub type Error = Box<dyn std::error::Error>;
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, Clone, Copy)]
+pub enum Command {
+    Read { addr: u32 },
+    Write { addr: u32, data: u32 },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Event {
+    Read { addr: u32, data: u32 },
+    Write { addr: u32, data: u32 },
+}
 
 pub struct SerialSubsys {
     port: SerialStream,
@@ -28,8 +41,8 @@ impl SerialSubsys {
 
     pub async fn run(
         self,
-        app_command_rx: broadcast::Receiver<String>,
-        serial_command_tx: mpsc::Sender<String>,
+        app_command_rx: broadcast::Receiver<Command>,
+        serial_event_tx: mpsc::Sender<Event>,
     ) -> Result<()> {
         let (serial_rx_port, serial_tx_port) = tokio::io::split(self.port);
         let serial_writer = FramedWrite::new(serial_tx_port, LinesCodec::new());
@@ -43,22 +56,57 @@ impl SerialSubsys {
         tokio::select! {
             result = process_serial_tx(app_command_rx0, serial_writer) => result,
             result = process_serial_rx(serial_reader, serial_forward_tx) => result,
-            result = process_serial_buffer(&mut app_command_rx1, &mut serial_forward_rx, serial_command_tx) => result,
+            result = process_serial_buffer(&mut app_command_rx1, &mut serial_forward_rx, serial_event_tx) => result,
         }?;
 
         Ok(())
     }
 }
 
+impl FromStr for Command {
+    type Err = Error;
+
+    fn from_str(s: &str) -> ::std::result::Result<Self, Self::Err> {
+        let (command, args) = s
+            .split_once(char::is_whitespace)
+            .ok_or_else(|| Error::from("unrecognized command"))?;
+        match command {
+            "rd" => {
+                let addr = parse_based_int(args)?;
+                Ok(Self::Read { addr })
+            }
+            "wr" => {
+                let (addr, data) = args
+                    .split_once(char::is_whitespace)
+                    .ok_or_else(|| Error::from("expected 2 arguments"))?;
+                let addr = parse_based_int(&addr)?;
+                let data = parse_based_int(&data)?;
+                Ok(Self::Write { addr, data })
+            }
+            _ => Err("unrecognized command")?,
+        }
+    }
+}
+
+impl fmt::Display for Command {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Read { addr } => write!(f, "rd {addr}"),
+            Self::Write { addr, data } => write!(f, "wr {addr} {data}"),
+        }
+    }
+}
+
+
 #[tracing::instrument(skip_all)]
 pub async fn process_serial_tx(
-    mut app_command_rx: broadcast::Receiver<String>,
+    mut app_command_rx: broadcast::Receiver<Command>,
     mut writer: impl Sink<String> + Unpin,
 ) -> Result<()> {
     loop {
         let command = app_command_rx.recv().await?;
         writer
-            .send(command)
+            .send(command.to_string())
             .await
             .map_err(|_| Error::from("could not send"))?;
     }
@@ -89,48 +137,17 @@ enum BufferState {
     WaitForResponse(Command),
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum Command {
-    Read { addr: u32 },
-    Write { addr: u32, data: u32 },
-}
-
-impl FromStr for Command {
-    type Err = Error;
-
-    fn from_str(s: &str) -> ::std::result::Result<Self, Self::Err> {
-        let (command, args) = s
-            .split_once(char::is_whitespace)
-            .ok_or_else(|| Error::from("unrecognized command"))?;
-        match command {
-            "rd" => {
-                let addr = parse_based_int(args)?;
-                Ok(Self::Read { addr })
-            }
-            "wr" => {
-                let (addr, data) = args
-                    .split_once(char::is_whitespace)
-                    .ok_or_else(|| Error::from("expected 2 arguments"))?;
-                let addr = parse_based_int(&addr)?;
-                let data = parse_based_int(&data)?;
-                Ok(Self::Write { addr, data })
-            }
-            _ => Err("unrecognized command")?,
-        }
-    }
-}
-
 #[tracing::instrument(skip_all)]
 pub async fn process_serial_buffer(
-    app_command_rx: &mut broadcast::Receiver<String>,
+    app_command_rx: &mut broadcast::Receiver<Command>,
     serial_forward_rx: &mut mpsc::Receiver<String>,
-    serial_command_tx: mpsc::Sender<String>,
+    serial_event_tx: mpsc::Sender<Event>,
 ) -> Result<()> {
     let mut state = BufferState::WaitForCommand;
 
     loop {
         let line = tokio::select! {
-            line = app_command_rx.recv() => line?,
+            command = app_command_rx.recv() => command?.to_string(),
             line = serial_forward_rx.recv() => line.ok_or_else(|| Error::from("channel closed"))?,
         };
 
@@ -153,9 +170,9 @@ pub async fn process_serial_buffer(
 
         if let BufferState::WaitForResponse(Command::Read { addr }) = state {
             let data = parse_based_int(&line)?;
-            serial_command_tx.send(format!("event: rd {addr} {data}")).await?;
+            serial_event_tx.send(Event::Read { addr, data }).await?;
         } else if let Some(Command::Write { addr, data }) = command {
-            serial_command_tx.send(format!("event: wr {addr} {data}")).await?;
+            serial_event_tx.send(Event::Write { addr, data }).await?;
         }
 
         state = next_state;

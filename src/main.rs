@@ -1,4 +1,6 @@
-use serial_poc::{SerialSubsys, Result};
+use serial_poc::{SerialSubsys, Command, Event, Result};
+
+use std::str::FromStr;
 
 use clap::Parser;
 use futures::{StreamExt};
@@ -27,7 +29,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     let (app_command_tx, app_command_rx) = broadcast::channel(2);
-    let (serial_command_tx, serial_command_rx) = mpsc::channel(1);
+    let (serial_event_tx, serial_event_rx) = mpsc::channel(1);
 
     let serial = SerialSubsys::new(
         &args.path,
@@ -36,22 +38,23 @@ async fn main() -> Result<()> {
 
     tokio::select! {
         result = process_commands(app_command_tx) => result,
-        result = serial.run(app_command_rx, serial_command_tx) => result,
-        result = report_events(serial_command_rx) => result,
+        result = serial.run(app_command_rx, serial_event_tx) => result,
+        result = report_events(serial_event_rx) => result,
     }?;
 
     Ok(())
 }
 
 #[tracing::instrument(skip_all)]
-async fn process_commands(app_command_tx: broadcast::Sender<String>) -> Result<()> {
+async fn process_commands(app_command_tx: broadcast::Sender<Command>) -> Result<()> {
     let stdin = tokio::io::stdin();
     let mut reader = FramedRead::new(stdin, LinesCodec::new());
 
     while let Some(result) = reader.next().await {
         match result {
             Ok(line) => {
-                app_command_tx.send(line)?;
+                let command = Command::from_str(&line)?;
+                app_command_tx.send(command)?;
             }
             Err(e) => {
                 error!(?e);
@@ -63,7 +66,7 @@ async fn process_commands(app_command_tx: broadcast::Sender<String>) -> Result<(
 }
 
 #[tracing::instrument(skip_all)]
-async fn report_events(mut serial_command_rx: mpsc::Receiver<String>) -> Result<()> {
+async fn report_events(mut serial_command_rx: mpsc::Receiver<Event>) -> Result<()> {
     loop {
         let event = serial_command_rx.recv().await;
         info!(?event);
