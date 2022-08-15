@@ -1,4 +1,4 @@
-use serial_poc::{SerialSubsys, Command, Event, Result};
+use serial_poc::{UartDap, Command, Event, Result};
 
 use std::str::FromStr;
 
@@ -31,7 +31,7 @@ async fn main() -> Result<()> {
     let (app_command_tx, app_command_rx) = broadcast::channel(2);
     let (serial_event_tx, serial_event_rx) = mpsc::channel(1);
 
-    let serial = SerialSubsys::new(
+    let serial = UartDap::new(
         &args.path,
         args.baud_rate,
     )?;

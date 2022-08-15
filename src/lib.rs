@@ -23,11 +23,12 @@ pub enum Event {
     Write { addr: u32, data: u32 },
 }
 
-pub struct SerialSubsys {
+// UART Debug Access Port
+pub struct UartDap {
     port: SerialStream,
 }
 
-impl SerialSubsys {
+impl UartDap {
     pub fn new(
         path: &str,
         baud_rate: u32,
