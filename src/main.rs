@@ -1,10 +1,10 @@
-use uart_dap::{UartDap, Command, Event, Result};
+use uart_dap::{UartDap, Command, Event, Echo, Result};
 
 use std::str::FromStr;
 
 use clap::Parser;
 use futures::{StreamExt};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, LinesCodec};
 use tracing::{error, info};
 use tracing_subscriber;
@@ -12,9 +12,14 @@ use tracing_subscriber;
 #[derive(Parser)]
 #[clap(author, version, about)]
 struct Args {
+    /// Disable local echo
+    #[clap(long)]
+    no_echo: bool,
+
     #[clap(short, long, default_value_t = 9600)]
     baud_rate: u32,
 
+    /// Path to serial port device
     path: String,
 }
 
@@ -28,12 +33,13 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    let (app_command_tx, app_command_rx) = broadcast::channel(2);
+    let (app_command_tx, app_command_rx) = mpsc::channel(1);
     let (serial_event_tx, serial_event_rx) = mpsc::channel(1);
 
     let serial = UartDap::new(
         &args.path,
         args.baud_rate,
+        if args.no_echo { Echo::Off } else { Echo::On },
     )?;
 
     tokio::select! {
@@ -46,7 +52,7 @@ async fn main() -> Result<()> {
 }
 
 #[tracing::instrument(skip_all)]
-async fn process_commands(app_command_tx: broadcast::Sender<Command>) -> Result<()> {
+async fn process_commands(app_command_tx: mpsc::Sender<Command>) -> Result<()> {
     let stdin = tokio::io::stdin();
     let mut reader = FramedRead::new(stdin, LinesCodec::new());
 
@@ -54,7 +60,7 @@ async fn process_commands(app_command_tx: broadcast::Sender<Command>) -> Result<
         match result {
             Ok(line) => {
                 let command = Command::from_str(&line)?;
-                app_command_tx.send(command)?;
+                app_command_tx.send(command).await?;
             }
             Err(e) => {
                 error!(?e);

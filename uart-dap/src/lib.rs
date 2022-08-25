@@ -2,7 +2,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use futures::{Sink, SinkExt, Stream, StreamExt};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 use tokio_serial::SerialPortBuilderExt;
 use tokio_serial::SerialStream;
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
@@ -10,6 +10,12 @@ use tracing::{error, info};
 
 pub type Error = Box<dyn std::error::Error>;
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Echo {
+    On,
+    Off,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum Command {
@@ -26,38 +32,42 @@ pub enum Event {
 // UART Debug Access Port
 pub struct UartDap {
     port: SerialStream,
+    echo: Echo,
 }
 
 impl UartDap {
     pub fn new(
         path: &str,
         baud_rate: u32,
+        echo: Echo,
     ) -> Result<Self> {
         let port = tokio_serial::new(path, baud_rate).open_native_async()?;
 
         Ok(Self {
             port,
+            echo,
         })
     }
 
     pub async fn run(
         self,
-        app_command_rx: broadcast::Receiver<Command>,
+        app_command_rx: mpsc::Receiver<Command>,
         serial_event_tx: mpsc::Sender<Event>,
     ) -> Result<()> {
         let (serial_rx_port, serial_tx_port) = tokio::io::split(self.port);
         let serial_writer = FramedWrite::new(serial_tx_port, LinesCodec::new());
         let serial_reader = FramedRead::new(serial_rx_port, LinesCodec::new());
 
-        let app_command_rx0 = app_command_rx;
-        let mut app_command_rx1 = app_command_rx0.resubscribe();
+        let (app_command_echo_tx, mut app_command_echo_rx) = mpsc::channel(1);
+        let (app_command_serial_tx, app_command_serial_rx) = mpsc::channel(1);
 
         let (serial_forward_tx, mut serial_forward_rx) = mpsc::channel(1);
 
         tokio::select! {
-            result = process_serial_tx(app_command_rx0, serial_writer) => result,
+            result = process_input(app_command_rx, app_command_echo_tx, app_command_serial_tx, self.echo) => result,
+            result = process_serial_tx(app_command_serial_rx, serial_writer) => result,
             result = process_serial_rx(serial_reader, serial_forward_tx) => result,
-            result = process_serial_buffer(&mut app_command_rx1, &mut serial_forward_rx, serial_event_tx) => result,
+            result = process_serial_buffer(&mut app_command_echo_rx, &mut serial_forward_rx, serial_event_tx) => result,
         }?;
 
         Ok(())
@@ -98,19 +108,35 @@ impl fmt::Display for Command {
     }
 }
 
+pub async fn process_input(
+    mut app_command_rx: mpsc::Receiver<Command>,
+    echo_tx: mpsc::Sender<Command>,
+    serial_tx: mpsc::Sender<Command>,
+    echo: Echo,
+) -> Result<()> {
+    while let Some(command) = app_command_rx.recv().await {
+        if echo == Echo::On {
+            echo_tx.send(command).await?;
+        }
+        serial_tx.send(command).await?;
+    }
+
+    Ok(())
+}
 
 #[tracing::instrument(skip_all)]
 pub async fn process_serial_tx(
-    mut app_command_rx: broadcast::Receiver<Command>,
+    mut app_command_rx: mpsc::Receiver<Command>,
     mut writer: impl Sink<String> + Unpin,
 ) -> Result<()> {
-    loop {
-        let command = app_command_rx.recv().await?;
+    while let Some(command) = app_command_rx.recv().await {
         writer
             .send(command.to_string())
             .await
             .map_err(|_| Error::from("could not send"))?;
     }
+
+    Ok(())
 }
 
 #[tracing::instrument(skip_all)]
@@ -140,7 +166,7 @@ enum BufferState {
 
 #[tracing::instrument(skip_all)]
 pub async fn process_serial_buffer(
-    app_command_rx: &mut broadcast::Receiver<Command>,
+    app_command_rx: &mut mpsc::Receiver<Command>,
     serial_forward_rx: &mut mpsc::Receiver<String>,
     serial_event_tx: mpsc::Sender<Event>,
 ) -> Result<()> {
@@ -148,8 +174,8 @@ pub async fn process_serial_buffer(
 
     loop {
         let line = tokio::select! {
-            command = app_command_rx.recv() => command?.to_string(),
-            line = serial_forward_rx.recv() => line.ok_or_else(|| Error::from("channel closed"))?,
+            command = app_command_rx.recv() => command.ok_or_else(|| "channel closed")?.to_string(),
+            line = serial_forward_rx.recv() => line.ok_or_else(|| "channel closed")?,
         };
 
         // Skip blank lines
