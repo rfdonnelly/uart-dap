@@ -80,7 +80,7 @@ impl FromStr for Command {
     fn from_str(s: &str) -> ::std::result::Result<Self, Self::Err> {
         let (command, args) = s
             .split_once(char::is_whitespace)
-            .ok_or_else(|| Error::from("unrecognized command"))?;
+            .ok_or_else(|| "unrecognized command")?;
         match command {
             "rd" => {
                 let addr = parse_based_int(args)?;
@@ -89,7 +89,7 @@ impl FromStr for Command {
             "wr" => {
                 let (addr, data) = args
                     .split_once(char::is_whitespace)
-                    .ok_or_else(|| Error::from("expected 2 arguments"))?;
+                    .ok_or_else(|| "expected 2 arguments")?;
                 let addr = parse_based_int(&addr)?;
                 let data = parse_based_int(&data)?;
                 Ok(Self::Write { addr, data })
