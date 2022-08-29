@@ -176,7 +176,7 @@ async fn serial_transmitter(
 #[derive(Debug, Clone)]
 enum BufferState {
     WaitForCommand,
-    WaitForResponse { command: Command, lines: u8 },
+    WaitForResponse(Command),
 }
 
 #[tracing::instrument(skip_all)]
@@ -217,10 +217,6 @@ async fn serial_combiner(
     }
 }
 
-fn div_ceil(lhs: u32, rhs: u32) -> u32 {
-    (lhs + rhs - 1) / rhs
-}
-
 // Parses reads like:
 //
 // [20220204T044316] DEBUG> mr kernel 0xC0000010
@@ -247,10 +243,8 @@ async fn process_line(
 
                                 Ok(state)
                             }
-                            Command::Read { addr: _, nbytes } => {
-                                let lines =
-                                    div_ceil(nbytes.into(), MAX_BYTES_PER_LINE).try_into()?;
-                                Ok(BufferState::WaitForResponse { command, lines })
+                            Command::Read { addr: _, nbytes: _ } => {
+                                Ok(BufferState::WaitForResponse(command))
                             }
                         }
                     } else {
@@ -260,7 +254,7 @@ async fn process_line(
                 _ => Ok(state),
             }
         }
-        BufferState::WaitForResponse { command, lines } => {
+        BufferState::WaitForResponse(command) => {
             if let Command::Read { addr, nbytes } = command {
                 if let Some((remaining, _)) = line.split_once(" |") {
                     if let Some((_, remaining)) = remaining.split_once(": ") {
@@ -283,12 +277,11 @@ async fn process_line(
                             event_tx.send(event).await?;
                         }
 
-                        if lines > 1 {
+                        if nbytes > MAX_BYTES_PER_LINE {
                             let addr = addr + MAX_BYTES_PER_LINE;
                             let nbytes = nbytes - MAX_BYTES_PER_LINE;
                             let command = Command::Read { addr, nbytes };
-                            let lines = lines - 1;
-                            Ok(BufferState::WaitForResponse { command, lines })
+                            Ok(BufferState::WaitForResponse(command))
                         } else {
                             Ok(BufferState::WaitForCommand)
                         }
