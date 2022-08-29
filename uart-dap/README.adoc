@@ -8,7 +8,7 @@ A UART DAP (Debug Access Port) for Green Hills Integrity and WxWork Wind River s
 * Configurable echo: local, remote
 * Configurable line endings: lf, crlf
 
-== Example
+== Example Usages
 
 [source,rust]
 ----
@@ -43,6 +43,38 @@ async fn main() -> Result<()> {
     Ok(())
 }
 ----
+
+== Runnable Examples
+
+Run the following in three separate terminals.
+
+=== Create Two Virtual Serial Ports
+
+ socat -d -d -v pty,link=ttyS0,raw,echo=0 pty,link=ttyS1,raw,echo=0
+
+=== Start the DAP Server
+
+ cargo run --example server -- ttyS1
+
+=== Start the DAP Client
+
+ cargo run --example client -- ttyS0
+
+=== Enter Commands
+
+The following commands can be entered into the terminal to send to the model.
+
+`help`::
+Prints the help.
+
+`exit`::
+Terminates the server.
+
+`mr kernel <addr> [<nbytes>]`::
+Read a memory location.
+
+`mw kernel <addr> <data>`::
+Write a memory location.
 
 == Test
 
