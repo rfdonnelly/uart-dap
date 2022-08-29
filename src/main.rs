@@ -85,8 +85,6 @@ async fn main() -> Result<()> {
 
 #[tracing::instrument(skip_all)]
 async fn process_commands(app_command_tx: mpsc::Sender<Command>) -> Result<()> {
-    info!("started");
-
     let stdin = tokio::io::stdin();
     let mut reader = FramedRead::new(stdin, LinesCodec::new());
 
@@ -111,16 +109,8 @@ async fn process_commands(app_command_tx: mpsc::Sender<Command>) -> Result<()> {
 
 #[tracing::instrument(skip_all)]
 async fn report_events(mut serial_command_rx: mpsc::Receiver<Event>) -> Result<()> {
-    info!("started");
-
     loop {
         let event = serial_command_rx.recv().await;
         info!(?event);
     }
-}
-
-#[cfg(test)]
-mod test {
-    #[tokio::test]
-    async fn message() {}
 }

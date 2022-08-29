@@ -491,9 +491,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "futures",
- "futures-sink",
  "tokio",
- "tokio-serial",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
