@@ -258,8 +258,8 @@ async fn process_line(
         BufferState::WaitForResponse(command) => {
             if_chain! {
                 if let Command::Read { addr, nbytes } = command;
-                if let Some((remaining, _)) = line.split_once(" |");
-                if let Some((_, remaining)) = remaining.split_once(": ");
+                if let Some((_, remaining)) = line.split_once(": ");
+                if let Some((remaining, _)) = remaining.split_once(" |");
                 then {
                     let read_bytes = remaining
                         .split_ascii_whitespace()
