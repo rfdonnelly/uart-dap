@@ -6,7 +6,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::sync::mpsc;
 use tokio_serial::SerialPortBuilderExt;
 use tokio_serial::SerialStream;
-use tracing::info;
+use tracing::{info, trace};
 
 pub type Error = Box<dyn std::error::Error>;
 pub type Result<T> = std::result::Result<T, Error>;
@@ -42,13 +42,13 @@ pub enum Target {
     Integrity,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     Read { addr: u32 },
     Write { addr: u32, data: u32 },
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
     Read { addr: u32, data: u32 },
     Write { addr: u32, data: u32 },
@@ -114,8 +114,8 @@ impl Command {
 impl fmt::Display for Command {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Self::Read { addr } => write!(f, "mr kernel {addr}"),
-            Self::Write { addr, data } => write!(f, "mw kernel {addr} {data}"),
+            Self::Read { addr } => write!(f, "mr kernel {addr:#x}"),
+            Self::Write { addr, data } => write!(f, "mw kernel {addr:#x} {data:#x}"),
         }
     }
 }
@@ -186,20 +186,20 @@ async fn serial_combiner(
         let bytes = tokio::select! {
             result = command_echo_rx.recv() => {
                 let command = result.ok_or_else(|| "channel closed")?;
-                info!(?command);
+                trace!(?command);
                 let message = format!("{}{}", command, line_ending);
                 // TODO: Don't allocate a Vec everytime
                 Result::<Vec<u8>>::Ok(message.as_bytes().to_vec())
             }
             result = serial_rx.read_u8() => {
                 let byte = result.map_err(|_| "channel closed")?;
-                info!(?byte);
+                trace!(?byte);
                 Result::<Vec<u8>>::Ok(vec![byte])
             }
         }?;
 
         line_buffer.put_slice(&bytes);
-        info!(line = str::from_utf8(&line_buffer)?);
+        trace!(line = str::from_utf8(&line_buffer)?);
 
         if let Some(b'\n') = line_buffer.last() {
             let line = str::from_utf8(&line_buffer)?.trim();
@@ -226,6 +226,7 @@ async fn process_line(
                         match command {
                             Command::Write { addr, data } => {
                                 let event = Event::Write { addr, data };
+                                info!(?event);
                                 event_tx.send(event).await?;
                             }
                             Command::Read { addr: _ } => {
@@ -238,12 +239,10 @@ async fn process_line(
             }
         }
         BufferState::WaitForResponse(command) => {
-            info!(?state);
             if let Command::Read { addr } = command {
                 let data = parse_based_int(&line)?;
-                info!(?state, ?data);
                 let event = Event::Read { addr, data };
-                info!(?state, ?event);
+                info!(?event);
                 event_tx.send(event).await?;
             }
 

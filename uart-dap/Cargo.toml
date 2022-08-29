@@ -12,3 +12,8 @@ futures-sink = "0.3.21"
 tokio = { version = "1.19.2", features = ["sync", "macros", "io-util"] }
 tokio-serial = "5.4.3"
 tracing = "0.1.35"
+
+[dev-dependencies]
+tokio = { version = "1.19", features = ["macros", "process", "rt", "sync", "time"] }
+tracing = "0.1.35"
+tracing-subscriber = "0.3"
