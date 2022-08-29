@@ -1,4 +1,5 @@
 use std::fmt;
+use std::num::ParseIntError;
 use std::str::{self, FromStr};
 
 use bytes::{BufMut, BytesMut};
@@ -12,6 +13,8 @@ pub type Error = Box<dyn std::error::Error>;
 pub type Result<T> = std::result::Result<T, Error>;
 
 const LINE_BUFFER_SIZE: usize = 4096;
+const MAX_BYTES_PER_LINE: u32 = 16;
+const READ_DEFAULT_NBYTES: u32 = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Echo {
@@ -44,7 +47,7 @@ pub enum Target {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
-    Read { addr: u32 },
+    Read { addr: u32, nbytes: u32 },
     Write { addr: u32, data: u32 },
 }
 
@@ -97,9 +100,14 @@ impl UartDap {
 impl Command {
     pub fn from_tokens(tokens: &[&str]) -> Option<Self> {
         match tokens {
+            ["mr", "kernel", addr, nbytes] => {
+                let addr = parse_based_int(&addr).ok()?;
+                let nbytes = parse_based_int(&nbytes).ok()?;
+                Some(Self::Read { addr, nbytes })
+            }
             ["mr", "kernel", addr] => {
                 let addr = parse_based_int(&addr).ok()?;
-                Some(Self::Read { addr })
+                Some(Self::Read { addr, nbytes: READ_DEFAULT_NBYTES })
             }
             ["mw", "kernel", addr, data] => {
                 let addr = parse_based_int(&addr).ok()?;
@@ -114,7 +122,7 @@ impl Command {
 impl fmt::Display for Command {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Self::Read { addr } => write!(f, "mr kernel {addr:#x}"),
+            Self::Read { addr, nbytes } => write!(f, "mr kernel {addr:#x} {nbytes}"),
             Self::Write { addr, data } => write!(f, "mw kernel {addr:#x} {data:#x}"),
         }
     }
@@ -166,7 +174,7 @@ async fn process_serial_tx(
 #[derive(Debug, Clone)]
 enum BufferState {
     WaitForCommand,
-    WaitForResponse(Command),
+    WaitForResponse { command: Command, lines: u8 },
 }
 
 #[tracing::instrument(skip_all)]
@@ -207,6 +215,14 @@ async fn serial_combiner(
     }
 }
 
+fn div_ceil(lhs: u32, rhs: u32) -> u32 {
+    (lhs + rhs - 1) / rhs
+}
+
+// Parses reads like:
+//
+// [20220204T044316] DEBUG> mr kernel 0xC0000010
+// [20220204T044316] c0000010: 03 0a 30 18  00 00 00 00  00 00 00 80  00 07 00 00 |..0.............|
 #[tracing::instrument(skip_all)]
 async fn process_line(
     prompt: &str,
@@ -226,29 +242,64 @@ async fn process_line(
                                 let event = Event::Write { addr, data };
                                 info!(?event);
                                 event_tx.send(event).await?;
+
+                                Ok(state)
                             }
-                            Command::Read { addr: _ } => {
-                                return Ok(BufferState::WaitForResponse(command));
+                            Command::Read { addr: _, nbytes } => {
+                                let lines = div_ceil(nbytes.into(), MAX_BYTES_PER_LINE).try_into()?;
+                                Ok(BufferState::WaitForResponse { command, lines })
                             }
                         }
+                    } else {
+                        Ok(state)
                     }
                 }
-                _ => {}
+                _ => Ok(state),
             }
         }
-        BufferState::WaitForResponse(command) => {
-            if let Command::Read { addr } = command {
-                let data = parse_based_int(&line)?;
-                let event = Event::Read { addr, data };
-                info!(?event);
-                event_tx.send(event).await?;
-            }
+        BufferState::WaitForResponse { command, lines } => {
+            if let Command::Read { addr, nbytes } = command {
+                if let Some((remaining, _)) = line.split_once(" |") {
+                    if let Some((_, remaining)) = remaining.split_once(": ") {
+                        let read_bytes = remaining.split_ascii_whitespace().map(|token| u32::from_str_radix(token, 16)).collect::<std::result::Result<Vec<_>, ParseIntError>>()?;
+                        info!(?read_bytes);
+                        let dwords = read_bytes.chunks(4).map(|dword_bytes| {
+                            dword_bytes
+                                .iter()
+                                .enumerate()
+                                .fold(0u32, |dword, (idx, byte)| {
+                                    dword | (byte << (idx * 8))
+                                })
+                        });
 
-            return Ok(BufferState::WaitForCommand);
+                        for (idx, dword) in dwords.enumerate() {
+                            let addr = addr + (idx as u32 * 4);
+                            let data = dword;
+                            let event = Event::Read { addr, data };
+                            info!(?event);
+                            event_tx.send(event).await?;
+                        }
+
+                        if lines > 1 {
+                            let addr = addr + MAX_BYTES_PER_LINE;
+                            let nbytes = nbytes - MAX_BYTES_PER_LINE;
+                            let command = Command::Read { addr, nbytes };
+                            let lines = lines - 1;
+                            Ok(BufferState::WaitForResponse { command, lines })
+                        } else {
+                            Ok(BufferState::WaitForCommand)
+                        }
+                    } else {
+                        Ok(BufferState::WaitForCommand)
+                    }
+                } else {
+                    Ok(BufferState::WaitForCommand)
+                }
+            } else {
+                Ok(BufferState::WaitForCommand)
+            }
         }
     }
-
-    Ok(state)
 }
 
 fn parse_based_int(s: &str) -> Result<u32> {

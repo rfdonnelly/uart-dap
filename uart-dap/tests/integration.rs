@@ -152,7 +152,7 @@ async fn performs_read_command() {
     model_tx.write_all(b"DEBUG> ").await.unwrap();
     time::sleep(Duration::from_millis(500)).await;
 
-    let command = Command::Read { addr: 0x600df00d };
+    let command = Command::Read { addr: 0x600df00d, nbytes: 20 };
     info!("Sending command");
     command_tx.send(command).await.unwrap();
 
@@ -161,16 +161,45 @@ async fn performs_read_command() {
     let n = model_rx.read(&mut buf).await.unwrap();
     assert_eq!(
         std::str::from_utf8(&buf[..n]).unwrap(),
-        "mr kernel 0x600df00d\n"
+        "mr kernel 0x600df00d 20\n"
     );
 
-    model_tx.write_all(b"0x5a5a5a5a\n").await.unwrap();
-    info!("Awaiting event");
+    model_tx.write_all(b"600df00d: 5a 5a 5a 5a  01 02 03 04  05 06 07 08  09 0a 0b 0c |-------|\n").await.unwrap();
+    info!("Awaiting events");
     assert_eq!(
         event_rx.recv().await.unwrap(),
         Event::Read {
             addr: 0x600df00d,
-            data: 0x5a5a5a5a
+            data: 0x5a5a5a5a,
+        }
+    );
+    assert_eq!(
+        event_rx.recv().await.unwrap(),
+        Event::Read {
+            addr: 0x600df011,
+            data: 0x04030201,
+        }
+    );
+    assert_eq!(
+        event_rx.recv().await.unwrap(),
+        Event::Read {
+            addr: 0x600df015,
+            data: 0x08070605,
+        }
+    );
+    assert_eq!(
+        event_rx.recv().await.unwrap(),
+        Event::Read {
+            addr: 0x600df019,
+            data: 0x0c0b0a09,
+        }
+    );
+    model_tx.write_all(b"600df01d: 0d 0e 0f 10                                        |-------|\n").await.unwrap();
+    assert_eq!(
+        event_rx.recv().await.unwrap(),
+        Event::Read {
+            addr: 0x600df01d,
+            data: 0x100f0e0d
         }
     );
 
