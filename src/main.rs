@@ -96,6 +96,8 @@ async fn process_commands(app_command_tx: mpsc::Sender<Command>) -> Result<()> {
                 let tokens = line.split_ascii_whitespace().collect::<Vec<_>>();
                 if let Some(command) = Command::from_tokens(&tokens) {
                     app_command_tx.send(command).await?;
+                } else {
+                    println!("unrecognized command");
                 }
             }
             Err(e) => {
