@@ -50,7 +50,15 @@ Run the following in three separate terminals.
 
 === Create Two Virtual Serial Ports
 
+Using http://www.dest-unreach.org/socat[socat]
+
  socat -d -d -v pty,link=ttyS0,raw,echo=0 pty,link=ttyS1,raw,echo=0
+
+Or using https://github.com/danielinux/ttybus[TTYBUS]
+
+ tty_bus -s ttyBus &
+ tty_fake -s ttyBus ttyS0 &
+ tty_fake -s ttyBus ttyS1 &
 
 === Start the DAP Server
 
