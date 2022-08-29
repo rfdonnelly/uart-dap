@@ -183,24 +183,22 @@ async fn serial_combiner(
     info!("started");
 
     loop {
-        let bytes = tokio::select! {
+        tokio::select! {
             result = command_echo_rx.recv() => {
                 let command = result.ok_or_else(|| "channel closed")?;
-                trace!(?command);
                 let message = format!("{}{}", command, line_ending);
-                // TODO: Don't allocate a Vec everytime
-                Result::<Vec<u8>>::Ok(message.as_bytes().to_vec())
+                line_buffer.put_slice(&message.as_bytes());
+                Result::<()>::Ok(())
             }
-            result = serial_rx.read_u8() => {
-                let byte = result.map_err(|_| "channel closed")?;
-                trace!(?byte);
-                Result::<Vec<u8>>::Ok(vec![byte])
+            result = serial_rx.read_buf(&mut line_buffer) => {
+                result.map_err(|_| "failed to read from serial port")?;
+                Result::<()>::Ok(())
             }
         }?;
 
-        line_buffer.put_slice(&bytes);
         trace!(line = str::from_utf8(&line_buffer)?);
 
+        // NOTE: Assumes IO is line based
         if let Some(b'\n') = line_buffer.last() {
             let line = str::from_utf8(&line_buffer)?.trim();
             state = process_line(prompt, state, line, &mut event_tx).await?;
