@@ -66,7 +66,9 @@ async fn main() -> Result<()> {
     let mut reader = FramedRead::new(rx_port, LinesCodec::new());
 
     println!("Modeling {}", args.os);
-    writer.write(format!("Modeling {}\r\n", args.os).as_bytes()).await?;
+    writer
+        .write(format!("Modeling {}\r\n", args.os).as_bytes())
+        .await?;
     writer.write(prompt(&args.os).as_bytes()).await?;
 
     while let Some(result) = reader.next().await {
@@ -83,7 +85,9 @@ async fn main() -> Result<()> {
                     }
                     Action::Exit => return Ok(()),
                     Action::Err(rsp) => {
-                        writer.write(format!("Error: {}\r\n", rsp).as_bytes()).await?;
+                        writer
+                            .write(format!("Error: {}\r\n", rsp).as_bytes())
+                            .await?;
                         writer.write(prompt(&args.os).as_bytes()).await?;
                     }
                     Action::Respond(rsp) => {
@@ -120,7 +124,8 @@ fn process_request(state: &mut State, req: Request) -> Action {
     let tokens = req.split_ascii_whitespace().collect::<Vec<_>>();
     match tokens[..] {
         ["exit"] => Action::Exit,
-        ["?"|"h"|"help"] => Action::Respond("Available Commands\r
+        ["?" | "h" | "help"] => Action::Respond(
+            "Available Commands\r
 \r
     exit\r
 \r
@@ -137,7 +142,9 @@ fn process_request(state: &mut State, req: Request) -> Action {
     help\r
 \r
         Displays available commands.\r
-".to_string()),
+"
+            .to_string(),
+        ),
         ["mw", "kernel", addr, data] => {
             let addr = match parse_based_int(&addr) {
                 Ok(value) => value,
@@ -150,7 +157,7 @@ fn process_request(state: &mut State, req: Request) -> Action {
             println!("Writing addr:{:#} data:{:#}", addr, data);
             state.mem.insert(addr, data);
             Action::None
-        },
+        }
         ["mr", "kernel", addr] => {
             let addr = match parse_based_int(&addr) {
                 Ok(value) => value,
@@ -166,7 +173,7 @@ fn process_request(state: &mut State, req: Request) -> Action {
                     Action::Respond("0x????_????".to_string())
                 }
             }
-        },
+        }
         _ => Action::Respond("".to_string()),
     }
 }

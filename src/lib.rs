@@ -107,7 +107,10 @@ impl Command {
             }
             ["mr", "kernel", addr] => {
                 let addr = parse_based_int(&addr).ok()?;
-                Some(Self::Read { addr, nbytes: READ_DEFAULT_NBYTES })
+                Some(Self::Read {
+                    addr,
+                    nbytes: READ_DEFAULT_NBYTES,
+                })
             }
             ["mw", "kernel", addr, data] => {
                 let addr = parse_based_int(&addr).ok()?;
@@ -153,7 +156,10 @@ async fn serial_transmitter(
     mut serial_tx: WriteHalf<SerialStream>,
 ) -> Result<()> {
     while let Some(command) = command_serial_rx.recv().await {
-        info!(data = format!("{command}{line_ending}").as_str(), "Transmitting serial");
+        info!(
+            data = format!("{command}{line_ending}").as_str(),
+            "Transmitting serial"
+        );
         serial_tx
             .write_all(command.to_string().as_bytes())
             .await
@@ -242,7 +248,8 @@ async fn process_line(
                                 Ok(state)
                             }
                             Command::Read { addr: _, nbytes } => {
-                                let lines = div_ceil(nbytes.into(), MAX_BYTES_PER_LINE).try_into()?;
+                                let lines =
+                                    div_ceil(nbytes.into(), MAX_BYTES_PER_LINE).try_into()?;
                                 Ok(BufferState::WaitForResponse { command, lines })
                             }
                         }
@@ -257,14 +264,15 @@ async fn process_line(
             if let Command::Read { addr, nbytes } = command {
                 if let Some((remaining, _)) = line.split_once(" |") {
                     if let Some((_, remaining)) = remaining.split_once(": ") {
-                        let read_bytes = remaining.split_ascii_whitespace().map(|token| u32::from_str_radix(token, 16)).collect::<std::result::Result<Vec<_>, ParseIntError>>()?;
+                        let read_bytes = remaining
+                            .split_ascii_whitespace()
+                            .map(|token| u32::from_str_radix(token, 16))
+                            .collect::<std::result::Result<Vec<_>, ParseIntError>>()?;
                         let dwords = read_bytes.chunks(4).map(|dword_bytes| {
                             dword_bytes
                                 .iter()
                                 .enumerate()
-                                .fold(0u32, |dword, (idx, byte)| {
-                                    dword | (byte << (idx * 8))
-                                })
+                                .fold(0u32, |dword, (idx, byte)| dword | (byte << (idx * 8)))
                         });
 
                         for (idx, dword) in dwords.enumerate() {

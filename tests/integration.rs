@@ -152,7 +152,10 @@ async fn performs_read_command() {
     model_tx.write_all(b"DEBUG> ").await.unwrap();
     time::sleep(Duration::from_millis(500)).await;
 
-    let command = Command::Read { addr: 0x600df00d, nbytes: 20 };
+    let command = Command::Read {
+        addr: 0x600df00d,
+        nbytes: 20,
+    };
     info!("Sending command");
     command_tx.send(command).await.unwrap();
 
@@ -164,7 +167,10 @@ async fn performs_read_command() {
         "mr kernel 0x600df00d 20\n"
     );
 
-    model_tx.write_all(b"600df00d: 5a 5a 5a 5a  01 02 03 04  05 06 07 08  09 0a 0b 0c |-------|\n").await.unwrap();
+    model_tx
+        .write_all(b"600df00d: 5a 5a 5a 5a  01 02 03 04  05 06 07 08  09 0a 0b 0c |-------|\n")
+        .await
+        .unwrap();
     info!("Awaiting events");
     assert_eq!(
         event_rx.recv().await.unwrap(),
@@ -194,7 +200,10 @@ async fn performs_read_command() {
             data: 0x0c0b0a09,
         }
     );
-    model_tx.write_all(b"600df01d: 0d 0e 0f 10                                        |-------|\n").await.unwrap();
+    model_tx
+        .write_all(b"600df01d: 0d 0e 0f 10                                        |-------|\n")
+        .await
+        .unwrap();
     assert_eq!(
         event_rx.recv().await.unwrap(),
         Event::Read {
