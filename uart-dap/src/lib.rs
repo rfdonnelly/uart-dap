@@ -88,8 +88,8 @@ impl UartDap {
         let prompt = "DEBUG>";
 
         tokio::select! {
-            result = command_input_splitter(app_command_rx, command_echo_tx, command_serial_tx, self.echo) => result,
-            result = process_serial_tx(self.line_ending, command_serial_rx, serial_tx) => result,
+            result = command_splitter(app_command_rx, command_echo_tx, command_serial_tx, self.echo) => result,
+            result = serial_transmitter(self.line_ending, command_serial_rx, serial_tx) => result,
             result = serial_combiner(prompt, self.line_ending, &mut command_echo_rx, &mut serial_rx, serial_event_tx) => result,
         }?;
 
@@ -129,16 +129,14 @@ impl fmt::Display for Command {
 }
 
 #[tracing::instrument(skip_all)]
-async fn command_input_splitter(
+async fn command_splitter(
     mut app_command_rx: mpsc::Receiver<Command>,
     command_echo_tx: mpsc::Sender<Command>,
     command_serial_tx: mpsc::Sender<Command>,
     echo: Echo,
 ) -> Result<()> {
-    info!("started");
-
     while let Some(command) = app_command_rx.recv().await {
-        info!(?command);
+        info!(?command, ?echo, "Received command");
         if echo == Echo::Local {
             command_echo_tx.send(command).await?;
         }
@@ -149,15 +147,13 @@ async fn command_input_splitter(
 }
 
 #[tracing::instrument(skip_all)]
-async fn process_serial_tx(
+async fn serial_transmitter(
     line_ending: LineEnding,
     mut command_serial_rx: mpsc::Receiver<Command>,
     mut serial_tx: WriteHalf<SerialStream>,
 ) -> Result<()> {
-    info!("started");
-
     while let Some(command) = command_serial_rx.recv().await {
-        info!(?command);
+        info!(data = format!("{command}{line_ending}").as_str(), "Transmitting serial");
         serial_tx
             .write_all(command.to_string().as_bytes())
             .await
@@ -188,18 +184,18 @@ async fn serial_combiner(
     let mut state = BufferState::WaitForCommand;
     let mut line_buffer = BytesMut::with_capacity(LINE_BUFFER_SIZE);
 
-    info!("started");
-
     loop {
         tokio::select! {
             result = command_echo_rx.recv() => {
                 let command = result.ok_or_else(|| "channel closed")?;
                 let message = format!("{}{}", command, line_ending);
                 line_buffer.put_slice(&message.as_bytes());
+                info!(?line_buffer, "Received command");
                 Result::<()>::Ok(())
             }
             result = serial_rx.read_buf(&mut line_buffer) => {
                 result.map_err(|_| "failed to read from serial port")?;
+                info!(?line_buffer, "Received serial");
                 Result::<()>::Ok(())
             }
         }?;
@@ -230,7 +226,7 @@ async fn process_line(
     line: &str,
     event_tx: &mut mpsc::Sender<Event>,
 ) -> Result<BufferState> {
-    info!(?state, ?line);
+    info!(?state, ?line, "Processing line");
     match state {
         BufferState::WaitForCommand => {
             let tokens = line.split_ascii_whitespace().collect::<Vec<_>>();
@@ -240,7 +236,7 @@ async fn process_line(
                         match command {
                             Command::Write { addr, data } => {
                                 let event = Event::Write { addr, data };
-                                info!(?event);
+                                info!(?event, "Sending event");
                                 event_tx.send(event).await?;
 
                                 Ok(state)
@@ -262,7 +258,6 @@ async fn process_line(
                 if let Some((remaining, _)) = line.split_once(" |") {
                     if let Some((_, remaining)) = remaining.split_once(": ") {
                         let read_bytes = remaining.split_ascii_whitespace().map(|token| u32::from_str_radix(token, 16)).collect::<std::result::Result<Vec<_>, ParseIntError>>()?;
-                        info!(?read_bytes);
                         let dwords = read_bytes.chunks(4).map(|dword_bytes| {
                             dword_bytes
                                 .iter()
@@ -276,7 +271,7 @@ async fn process_line(
                             let addr = addr + (idx as u32 * 4);
                             let data = dword;
                             let event = Event::Read { addr, data };
-                            info!(?event);
+                            info!(?event, "Sending event");
                             event_tx.send(event).await?;
                         }
 
