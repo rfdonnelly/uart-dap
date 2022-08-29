@@ -47,6 +47,6 @@ async fn main() -> Result<()> {
 == Test
 
 IMPORTANT: Care must be taken to prevent multiple tests from talking to the same ports at the same time.
-Limit the number of parrallel tests and test threads to 1.
+Limit the number of parallel tests and test threads to 1.
 
  cargo test -j1 -- --test-threads=1
