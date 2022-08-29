@@ -67,7 +67,12 @@ async fn main() -> Result<()> {
     let (app_command_tx, app_command_rx) = mpsc::channel(1);
     let (serial_event_tx, serial_event_rx) = mpsc::channel(1);
 
-    let serial = UartDap::new(&args.path, args.baud_rate, args.echo.into(), args.line_ending.into())?;
+    let serial = UartDap::new(
+        &args.path,
+        args.baud_rate,
+        args.echo.into(),
+        args.line_ending.into(),
+    )?;
 
     tokio::select! {
         result = process_commands(app_command_tx) => result,
