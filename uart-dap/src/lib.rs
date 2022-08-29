@@ -1,20 +1,45 @@
 use std::fmt;
-use std::str::FromStr;
+use std::str::{self, FromStr};
 
-use futures::{Sink, SinkExt, Stream, StreamExt};
+use bytes::{BufMut, BytesMut};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::sync::mpsc;
 use tokio_serial::SerialPortBuilderExt;
 use tokio_serial::SerialStream;
-use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
-use tracing::{error, info};
+use tracing::info;
 
 pub type Error = Box<dyn std::error::Error>;
 pub type Result<T> = std::result::Result<T, Error>;
 
+const LINE_BUFFER_SIZE: usize = 4096;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Echo {
-    On,
-    Off,
+    Local,
+    Remote,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineEnding {
+    Lf,
+    CrLf,
+}
+
+impl fmt::Display for LineEnding {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            LineEnding::Lf => write!(f, "\n"),
+            LineEnding::CrLf => write!(f, "\r\n"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    /// Wind River VxWorks
+    VxWorks,
+    /// Green Hills Integrity
+    Integrity,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -33,19 +58,17 @@ pub enum Event {
 pub struct UartDap {
     port: SerialStream,
     echo: Echo,
+    line_ending: LineEnding,
 }
 
 impl UartDap {
-    pub fn new(
-        path: &str,
-        baud_rate: u32,
-        echo: Echo,
-    ) -> Result<Self> {
+    pub fn new(path: &str, baud_rate: u32, echo: Echo, line_ending: LineEnding) -> Result<Self> {
         let port = tokio_serial::new(path, baud_rate).open_native_async()?;
 
         Ok(Self {
             port,
             echo,
+            line_ending,
         })
     }
 
@@ -54,47 +77,36 @@ impl UartDap {
         app_command_rx: mpsc::Receiver<Command>,
         serial_event_tx: mpsc::Sender<Event>,
     ) -> Result<()> {
-        let (serial_rx_port, serial_tx_port) = tokio::io::split(self.port);
-        let serial_writer = FramedWrite::new(serial_tx_port, LinesCodec::new());
-        let serial_reader = FramedRead::new(serial_rx_port, LinesCodec::new());
+        let (mut serial_rx, serial_tx) = tokio::io::split(self.port);
 
-        let (app_command_echo_tx, mut app_command_echo_rx) = mpsc::channel(1);
-        let (app_command_serial_tx, app_command_serial_rx) = mpsc::channel(1);
+        let (command_echo_tx, mut command_echo_rx) = mpsc::channel(1);
+        let (command_serial_tx, command_serial_rx) = mpsc::channel(1);
 
-        let (serial_forward_tx, mut serial_forward_rx) = mpsc::channel(1);
+        let prompt = "DEBUG>";
 
         tokio::select! {
-            result = process_input(app_command_rx, app_command_echo_tx, app_command_serial_tx, self.echo) => result,
-            result = process_serial_tx(app_command_serial_rx, serial_writer) => result,
-            result = process_serial_rx(serial_reader, serial_forward_tx) => result,
-            result = process_serial_buffer(&mut app_command_echo_rx, &mut serial_forward_rx, serial_event_tx) => result,
+            result = command_input_splitter(app_command_rx, command_echo_tx, command_serial_tx, self.echo) => result,
+            result = process_serial_tx(self.line_ending, command_serial_rx, serial_tx) => result,
+            result = serial_combiner(prompt, self.line_ending, &mut command_echo_rx, &mut serial_rx, serial_event_tx) => result,
         }?;
 
         Ok(())
     }
 }
 
-impl FromStr for Command {
-    type Err = Error;
-
-    fn from_str(s: &str) -> ::std::result::Result<Self, Self::Err> {
-        let (command, args) = s
-            .split_once(char::is_whitespace)
-            .ok_or_else(|| "unrecognized command")?;
-        match command {
-            "rd" => {
-                let addr = parse_based_int(args)?;
-                Ok(Self::Read { addr })
+impl Command {
+    pub fn from_tokens(tokens: &[&str]) -> Option<Self> {
+        match tokens {
+            ["mr", "kernel", addr] => {
+                let addr = parse_based_int(&addr).ok()?;
+                Some(Self::Read { addr })
             }
-            "wr" => {
-                let (addr, data) = args
-                    .split_once(char::is_whitespace)
-                    .ok_or_else(|| "expected 2 arguments")?;
-                let addr = parse_based_int(&addr)?;
-                let data = parse_based_int(&data)?;
-                Ok(Self::Write { addr, data })
+            ["mw", "kernel", addr, data] => {
+                let addr = parse_based_int(&addr).ok()?;
+                let data = parse_based_int(&data).ok()?;
+                Some(Self::Write { addr, data })
             }
-            _ => Err("unrecognized command")?,
+            _ => None,
         }
     }
 }
@@ -102,57 +114,50 @@ impl FromStr for Command {
 impl fmt::Display for Command {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Self::Read { addr } => write!(f, "rd {addr}"),
-            Self::Write { addr, data } => write!(f, "wr {addr} {data}"),
+            Self::Read { addr } => write!(f, "mr kernel {addr}"),
+            Self::Write { addr, data } => write!(f, "mw kernel {addr} {data}"),
         }
     }
 }
 
-pub async fn process_input(
+#[tracing::instrument(skip_all)]
+async fn command_input_splitter(
     mut app_command_rx: mpsc::Receiver<Command>,
-    echo_tx: mpsc::Sender<Command>,
-    serial_tx: mpsc::Sender<Command>,
+    command_echo_tx: mpsc::Sender<Command>,
+    command_serial_tx: mpsc::Sender<Command>,
     echo: Echo,
 ) -> Result<()> {
+    info!("started");
+
     while let Some(command) = app_command_rx.recv().await {
-        if echo == Echo::On {
-            echo_tx.send(command).await?;
+        info!(?command);
+        if echo == Echo::Local {
+            command_echo_tx.send(command).await?;
         }
-        serial_tx.send(command).await?;
+        command_serial_tx.send(command).await?;
     }
 
     Ok(())
 }
 
 #[tracing::instrument(skip_all)]
-pub async fn process_serial_tx(
-    mut app_command_rx: mpsc::Receiver<Command>,
-    mut writer: impl Sink<String> + Unpin,
+async fn process_serial_tx(
+    line_ending: LineEnding,
+    mut command_serial_rx: mpsc::Receiver<Command>,
+    mut serial_tx: WriteHalf<SerialStream>,
 ) -> Result<()> {
-    while let Some(command) = app_command_rx.recv().await {
-        writer
-            .send(command.to_string())
+    info!("started");
+
+    while let Some(command) = command_serial_rx.recv().await {
+        info!(?command);
+        serial_tx
+            .write_all(command.to_string().as_bytes())
             .await
-            .map_err(|_| Error::from("could not send"))?;
-    }
-
-    Ok(())
-}
-
-#[tracing::instrument(skip_all)]
-pub async fn process_serial_rx(
-    mut reader: impl Stream<Item = core::result::Result<String, LinesCodecError>> + Unpin,
-    serial_forward_tx: mpsc::Sender<String>,
-) -> Result<()> {
-    while let Some(result) = reader.next().await {
-        match result {
-            Ok(line) => {
-                serial_forward_tx.send(line).await?;
-            }
-            Err(e) => {
-                error!(?e);
-            }
-        }
+            .map_err(|_| "could not send")?;
+        serial_tx
+            .write_all(line_ending.to_string().as_bytes())
+            .await
+            .map_err(|_| "could not send")?;
     }
 
     Ok(())
@@ -165,45 +170,88 @@ enum BufferState {
 }
 
 #[tracing::instrument(skip_all)]
-pub async fn process_serial_buffer(
-    app_command_rx: &mut mpsc::Receiver<Command>,
-    serial_forward_rx: &mut mpsc::Receiver<String>,
-    serial_event_tx: mpsc::Sender<Event>,
+async fn serial_combiner(
+    prompt: &str,
+    line_ending: LineEnding,
+    command_echo_rx: &mut mpsc::Receiver<Command>,
+    mut serial_rx: impl AsyncRead + Unpin,
+    mut event_tx: mpsc::Sender<Event>,
 ) -> Result<()> {
     let mut state = BufferState::WaitForCommand;
+    let mut line_buffer = BytesMut::with_capacity(LINE_BUFFER_SIZE);
+
+    info!("started");
 
     loop {
-        let line = tokio::select! {
-            command = app_command_rx.recv() => command.ok_or_else(|| "channel closed")?.to_string(),
-            line = serial_forward_rx.recv() => line.ok_or_else(|| "channel closed")?,
-        };
+        let bytes = tokio::select! {
+            result = command_echo_rx.recv() => {
+                let command = result.ok_or_else(|| "channel closed")?;
+                info!(?command);
+                let message = format!("{}{}", command, line_ending);
+                // TODO: Don't allocate a Vec everytime
+                Result::<Vec<u8>>::Ok(message.as_bytes().to_vec())
+            }
+            result = serial_rx.read_u8() => {
+                let byte = result.map_err(|_| "channel closed")?;
+                info!(?byte);
+                Result::<Vec<u8>>::Ok(vec![byte])
+            }
+        }?;
 
-        // Skip blank lines
-        if line == "" {
-            continue;
+        line_buffer.put_slice(&bytes);
+        info!(line = str::from_utf8(&line_buffer)?);
+
+        if let Some(b'\n') = line_buffer.last() {
+            let line = str::from_utf8(&line_buffer)?.trim();
+            state = process_line(prompt, state, line, &mut event_tx).await?;
+            line_buffer.clear();
         }
-
-        let command = Command::from_str(&line).ok();
-
-        let next_state = if let BufferState::WaitForResponse(_) = state {
-            BufferState::WaitForCommand
-        } else if let Some(Command::Read { .. }) = command {
-            BufferState::WaitForResponse(command.unwrap())
-        } else {
-            state.clone()
-        };
-
-        info!(?state, ?next_state, ?line);
-
-        if let BufferState::WaitForResponse(Command::Read { addr }) = state {
-            let data = parse_based_int(&line)?;
-            serial_event_tx.send(Event::Read { addr, data }).await?;
-        } else if let Some(Command::Write { addr, data }) = command {
-            serial_event_tx.send(Event::Write { addr, data }).await?;
-        }
-
-        state = next_state;
     }
+}
+
+#[tracing::instrument(skip_all)]
+async fn process_line(
+    prompt: &str,
+    state: BufferState,
+    line: &str,
+    event_tx: &mut mpsc::Sender<Event>,
+) -> Result<BufferState> {
+    info!(?state, ?line);
+    match state {
+        BufferState::WaitForCommand => {
+            let tokens = line.split_ascii_whitespace().collect::<Vec<_>>();
+            match tokens.split_at(1) {
+                (first, user_tokens) if first == [prompt] => {
+                    if let Some(command) = Command::from_tokens(&user_tokens) {
+                        match command {
+                            Command::Write { addr, data } => {
+                                let event = Event::Write { addr, data };
+                                event_tx.send(event).await?;
+                            }
+                            Command::Read { addr: _ } => {
+                                return Ok(BufferState::WaitForResponse(command));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        BufferState::WaitForResponse(command) => {
+            info!(?state);
+            if let Command::Read { addr } = command {
+                let data = parse_based_int(&line)?;
+                info!(?state, ?data);
+                let event = Event::Read { addr, data };
+                info!(?state, ?event);
+                event_tx.send(event).await?;
+            }
+
+            return Ok(BufferState::WaitForCommand);
+        }
+    }
+
+    Ok(state)
 }
 
 fn parse_based_int(s: &str) -> Result<u32> {
