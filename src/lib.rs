@@ -3,6 +3,7 @@ use std::num::ParseIntError;
 use std::str::{self, FromStr};
 
 use bytes::{BufMut, BytesMut};
+use if_chain::if_chain;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::sync::mpsc;
 use tokio_serial::SerialPortBuilderExt;
@@ -255,44 +256,41 @@ async fn process_line(
             }
         }
         BufferState::WaitForResponse(command) => {
-            if let Command::Read { addr, nbytes } = command {
-                if let Some((remaining, _)) = line.split_once(" |") {
-                    if let Some((_, remaining)) = remaining.split_once(": ") {
-                        let read_bytes = remaining
-                            .split_ascii_whitespace()
-                            .map(|token| u32::from_str_radix(token, 16))
-                            .collect::<std::result::Result<Vec<_>, ParseIntError>>()?;
-                        let dwords = read_bytes.chunks(4).map(|dword_bytes| {
-                            dword_bytes
-                                .iter()
-                                .enumerate()
-                                .fold(0u32, |dword, (idx, byte)| dword | (byte << (idx * 8)))
-                        });
+            if_chain! {
+                if let Command::Read { addr, nbytes } = command;
+                if let Some((remaining, _)) = line.split_once(" |");
+                if let Some((_, remaining)) = remaining.split_once(": ");
+                then {
+                    let read_bytes = remaining
+                        .split_ascii_whitespace()
+                        .map(|token| u32::from_str_radix(token, 16))
+                        .collect::<std::result::Result<Vec<_>, ParseIntError>>()?;
+                    let dwords = read_bytes.chunks(4).map(|dword_bytes| {
+                        dword_bytes
+                            .iter()
+                            .enumerate()
+                            .fold(0u32, |dword, (idx, byte)| dword | (byte << (idx * 8)))
+                    });
 
-                        for (idx, dword) in dwords.enumerate() {
-                            let addr = addr + (idx as u32 * 4);
-                            let data = dword;
-                            let event = Event::Read { addr, data };
-                            info!(?event, "Sending event");
-                            event_tx.send(event).await?;
-                        }
+                    for (idx, dword) in dwords.enumerate() {
+                        let addr = addr + (idx as u32 * 4);
+                        let data = dword;
+                        let event = Event::Read { addr, data };
+                        info!(?event, "Sending event");
+                        event_tx.send(event).await?;
+                    }
 
-                        if nbytes > MAX_BYTES_PER_LINE {
-                            let addr = addr + MAX_BYTES_PER_LINE;
-                            let nbytes = nbytes - MAX_BYTES_PER_LINE;
-                            let command = Command::Read { addr, nbytes };
-                            Ok(BufferState::WaitForResponse(command))
-                        } else {
-                            Ok(BufferState::WaitForCommand)
-                        }
+                    if nbytes > MAX_BYTES_PER_LINE {
+                        let addr = addr + MAX_BYTES_PER_LINE;
+                        let nbytes = nbytes - MAX_BYTES_PER_LINE;
+                        let command = Command::Read { addr, nbytes };
+                        Ok(BufferState::WaitForResponse(command))
                     } else {
                         Ok(BufferState::WaitForCommand)
                     }
                 } else {
                     Ok(BufferState::WaitForCommand)
                 }
-            } else {
-                Ok(BufferState::WaitForCommand)
             }
         }
     }
