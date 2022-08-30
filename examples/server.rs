@@ -3,6 +3,8 @@ use std::str::FromStr;
 
 use clap::Parser;
 use derive_more::Display;
+use rand::prelude::*;
+use rand_pcg::Pcg32;
 use tokio::io::AsyncWriteExt;
 use tokio_serial::SerialPortBuilderExt;
 use tokio_stream::StreamExt;
@@ -33,12 +35,14 @@ enum Os {
 type Result<T> = core::result::Result<T, Box<dyn std::error::Error>>;
 
 struct State {
+    rng: Pcg32,
     mem: HashMap<u32, u32>,
 }
 
 impl State {
     fn new() -> Self {
         Self {
+            rng: Pcg32::from_entropy(),
             mem: HashMap::new(),
         }
     }
@@ -169,8 +173,9 @@ fn process_request(state: &mut State, req: Request) -> Action {
                     Action::Respond(format!("{:#x}", data))
                 }
                 None => {
-                    println!("Reading addr:{:#x} data:uninitialized", addr);
-                    Action::Respond("0x????_????".to_string())
+                    let data = state.rng.gen::<u32>();
+                    println!("Reading addr:{:#x} data:{:#x}", addr, data);
+                    Action::Respond(format!("{:#x}", data))
                 }
             }
         }

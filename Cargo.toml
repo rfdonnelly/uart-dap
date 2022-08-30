@@ -24,6 +24,8 @@ tokio-serial = "5"
 tokio-stream = "0.1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+rand = "0.8.5"
+rand_pcg = "0.3.1"
 
 [[example]]
 name = "client"
