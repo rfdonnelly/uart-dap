@@ -1,5 +1,6 @@
 use std::fmt;
 use std::num::ParseIntError;
+use std::ops::Deref;
 use std::str::{self, FromStr};
 
 use bytes::{BufMut, BytesMut};
@@ -207,14 +208,41 @@ async fn serial_combiner(
             }
         }?;
 
-        trace!(line = str::from_utf8(&line_buffer)?);
+        trace!(line = str::from_utf8(&line_buffer)?, "recevied data");
 
-        // NOTE: Assumes IO is line based
         if let Some(b'\n') = line_buffer.last() {
-            let line = str::from_utf8(&line_buffer)?.trim();
-            state = process_line(prompt, state, line, &mut event_tx).await?;
+            let lines = line_buffer.deref().split(|b| b == &b'\n');
+            for line in lines {
+                let line = str::from_utf8(&line)?.trim();
+                // TODO: remove this hack that accomodates for split with newline at end creating
+                // an empty array
+                if line != "" {
+                    state = process_line(prompt, state, line, &mut event_tx).await?;
+                }
+            }
             line_buffer.clear();
+        } else {
+            // Case where we have some number of full lines and a partial line
+            //
+            // Process the full lines, clear the buffer, and copy the partial line back into the
+            // buffer
+            //
+            // TODO: This could be optimized to prevent unnecessary data movement (e.g. circular buffer)
+            let nlines = line_buffer.iter().filter(|&&b| b == b'\n').count();
+            if nlines > 0 {
+                let lines = line_buffer.deref().split(|&b| b == b'\n').collect::<Vec<&[u8]>>();
+                let (full_lines, partial_lines) = lines.split_at(lines.len() - 1);
+                let partial_line = partial_lines.first().unwrap().iter().copied().collect::<Vec<u8>>();
+                for line in full_lines {
+                    let line = str::from_utf8(&line)?.trim();
+                    state = process_line(prompt, state, line, &mut event_tx).await?;
+                }
+                line_buffer.clear();
+                line_buffer.put_slice(&partial_line);
+            }
         }
+
+        trace!(line = str::from_utf8(&line_buffer)?, "processed lines");
     }
 }
 
