@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 
+use byteorder::{ByteOrder, BigEndian};
 use clap::Parser;
 use derive_more::Display;
 use rand::prelude::*;
@@ -162,25 +163,51 @@ fn process_request(state: &mut State, req: Request) -> Action {
             state.mem.insert(addr, data);
             Action::None
         }
+        ["mr", "kernel", addr, nbytes] => {
+            let addr = match parse_based_int(&addr) {
+                Ok(value) => value,
+                Err(_) => return Action::Err(format!("unable to parse addr: {}", addr)),
+            };
+            let nbytes = match parse_based_int(&nbytes) {
+                Ok(value) => value,
+                Err(_) => return Action::Err(format!("unable to parse nbytes: {}", nbytes)),
+            };
+            process_read_request(state, addr, nbytes)
+        }
         ["mr", "kernel", addr] => {
             let addr = match parse_based_int(&addr) {
                 Ok(value) => value,
                 Err(_) => return Action::Err(format!("unable to parse addr: {}", addr)),
             };
-            match state.mem.get(&addr) {
-                Some(data) => {
-                    println!("Reading addr:{:#x} data:{:#x}", addr, data);
-                    Action::Respond(format!("{:#x}", data))
-                }
-                None => {
-                    let data = state.rng.gen::<u32>();
-                    println!("Reading addr:{:#x} data:{:#x}", addr, data);
-                    Action::Respond(format!("{:#x}", data))
-                }
-            }
+            process_read_request(state, addr, 16)
         }
         _ => Action::Respond("".to_string()),
     }
+}
+
+fn div_ceil(lhs: u32, rhs: u32) -> u32 {
+    (lhs + rhs - 1) / rhs
+}
+
+fn process_read_request(state: &mut State, addr: u32, nbytes: u32) -> Action {
+    let ndwords = div_ceil(nbytes, 4);
+    let dwords = (0..ndwords).map(|dword_idx|  {
+        let dword_addr = addr + dword_idx;
+        let dword = match state.mem.get(&dword_addr) {
+            Some(&data) => data,
+            None => state.rng.gen::<u32>(),
+        };
+        dword
+    });
+    let bytes = dwords.flat_map(|dword| {
+        let mut bytes = [0; 4];
+        BigEndian::write_u32(&mut bytes, dword);
+        bytes
+    });
+    let byte_string = bytes.map(|byte| format!("{byte:x}")).collect::<Vec<String>>().join(" ");
+    let message = format!("{addr:x}: {byte_string} |--------|");
+
+    Action::Respond(message)
 }
 
 fn parse_based_int(s: &str) -> Result<u32> {
