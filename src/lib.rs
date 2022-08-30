@@ -5,6 +5,7 @@ use std::str::{self, FromStr};
 
 use bytes::{BufMut, BytesMut};
 use if_chain::if_chain;
+use serde::{Serialize, Deserialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::sync::mpsc;
 use tokio_serial::SerialPortBuilderExt;
@@ -47,13 +48,13 @@ pub enum Target {
     Integrity,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Command {
     Read { addr: u32, nbytes: u32 },
     Write { addr: u32, data: u32 },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Event {
     Read { addr: u32, data: u32 },
     Write { addr: u32, data: u32 },

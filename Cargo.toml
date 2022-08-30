@@ -11,6 +11,7 @@ bytes = "1.2"
 futures = "0.3"
 futures-sink = "0.3"
 if_chain = "1"
+serde = { version = "1.0.144", features = ["derive"] }
 tokio = { version = "1.19", features = ["sync", "macros", "io-util"] }
 tokio-serial = "5"
 tracing = "0.1"
