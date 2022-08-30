@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use byteorder::{ByteOrder, BigEndian};
+use byteorder::{BigEndian, ByteOrder};
 use clap::Parser;
 use derive_more::Display;
 use rand::prelude::*;
@@ -191,7 +191,7 @@ fn div_ceil(lhs: u32, rhs: u32) -> u32 {
 
 fn process_read_request(state: &mut State, addr: u32, nbytes: u32) -> Action {
     let ndwords = div_ceil(nbytes, 4);
-    let dwords = (0..ndwords).map(|dword_idx|  {
+    let dwords = (0..ndwords).map(|dword_idx| {
         let dword_addr = addr + dword_idx;
         let dword = match state.mem.get(&dword_addr) {
             Some(&data) => data,
@@ -204,7 +204,10 @@ fn process_read_request(state: &mut State, addr: u32, nbytes: u32) -> Action {
         BigEndian::write_u32(&mut bytes, dword);
         bytes
     });
-    let byte_string = bytes.map(|byte| format!("{byte:x}")).collect::<Vec<String>>().join(" ");
+    let byte_string = bytes
+        .map(|byte| format!("{byte:x}"))
+        .collect::<Vec<String>>()
+        .join(" ");
     let message = format!("{addr:x}: {byte_string} |--------|");
 
     Action::Respond(message)

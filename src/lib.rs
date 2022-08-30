@@ -5,7 +5,7 @@ use std::str::{self, FromStr};
 
 use bytes::{BufMut, BytesMut};
 use if_chain::if_chain;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::sync::mpsc;
 use tokio_serial::SerialPortBuilderExt;
@@ -231,9 +231,17 @@ async fn serial_combiner(
             // TODO: This could be optimized to prevent unnecessary data movement (e.g. circular buffer)
             let nlines = line_buffer.iter().filter(|&&b| b == b'\n').count();
             if nlines > 0 {
-                let lines = line_buffer.deref().split(|&b| b == b'\n').collect::<Vec<&[u8]>>();
+                let lines = line_buffer
+                    .deref()
+                    .split(|&b| b == b'\n')
+                    .collect::<Vec<&[u8]>>();
                 let (full_lines, partial_lines) = lines.split_at(lines.len() - 1);
-                let partial_line = partial_lines.first().unwrap().iter().copied().collect::<Vec<u8>>();
+                let partial_line = partial_lines
+                    .first()
+                    .unwrap()
+                    .iter()
+                    .copied()
+                    .collect::<Vec<u8>>();
                 for line in full_lines {
                     let line = str::from_utf8(&line)?.trim();
                     state = process_line(prompt, state, line, &mut event_tx).await?;
