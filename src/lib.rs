@@ -270,6 +270,12 @@ async fn process_line(
     match state {
         BufferState::WaitForCommand => {
             let tokens = line.split_ascii_whitespace().collect::<Vec<_>>();
+
+            // Guard against panic on split_at when tokens is empty
+            if tokens.is_empty() {
+                return Ok(state);
+            }
+
             match tokens.split_at(1) {
                 (first, user_tokens) if first == [prompt] => {
                     if let Some(command) = Command::from_tokens(&user_tokens) {
