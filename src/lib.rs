@@ -209,7 +209,7 @@ async fn serial_combiner(
             }
         }?;
 
-        trace!(line = str::from_utf8(&line_buffer)?, "recevied data");
+        trace!(line_buffer = str::from_utf8(&line_buffer)?, "recevied data");
 
         if let Some(b'\n') = line_buffer.last() {
             let lines = line_buffer.deref().split(|b| b == &b'\n');
