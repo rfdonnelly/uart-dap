@@ -91,7 +91,6 @@ Limit the number of parallel tests and test threads to 1.
 
  cargo test -j1 -- --test-threads=1
 
-
 == License
 
 Licensed under either of
