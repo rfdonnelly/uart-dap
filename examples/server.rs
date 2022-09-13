@@ -6,7 +6,7 @@ use clap::Parser;
 use derive_more::Display;
 use rand::prelude::*;
 use rand_pcg::Pcg32;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_serial::SerialPortBuilderExt;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, LinesCodec};
@@ -61,48 +61,75 @@ enum Action {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut state = State::new();
     let args = Args::parse();
 
     let port = tokio_serial::new(args.path, args.baud_rate).open_native_async()?;
 
     let (rx_port, tx_port) = tokio::io::split(port);
-    let mut writer = tx_port;
-    let mut reader = FramedRead::new(rx_port, LinesCodec::new());
+    let writer = tx_port;
+    let reader = FramedRead::new(rx_port, LinesCodec::new());
 
-    println!("Modeling {}", args.os);
+    listen(reader, writer, args.echo, &args.os).await?;
+
+    Ok(())
+}
+
+async fn listen<R, W>(
+    mut reader: FramedRead<R, LinesCodec>,
+    mut writer: W,
+    echo: bool,
+    os: &Os,
+) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut state = State::new();
+
+    println!("Modeling {}", os);
     writer
-        .write(format!("Modeling {}\r\n", args.os).as_bytes())
+        .write(format!("Modeling {}\r\n", os).as_bytes())
         .await?;
-    writer.write(prompt(&args.os).as_bytes()).await?;
+    writer.write(prompt(os).as_bytes()).await?;
 
-    while let Some(result) = reader.next().await {
-        match result {
-            Ok(req) => {
-                println!("Received: {}", req);
-                if args.echo {
-                    writer.write(format!("{}\r\n", req).as_bytes()).await?;
+    loop {
+        tokio::select! {
+            option = reader.next() => {
+                match option {
+                    Some(result) => {
+                        match result {
+                            Ok(req) => {
+                                println!("Received: {}", req);
+                                if echo {
+                                    writer.write(format!("{}\r\n", req).as_bytes()).await?;
+                                }
+                                let action = process_request(&mut state, &req);
+                                match action {
+                                    Action::None => {
+                                        writer.write(prompt(os).as_bytes()).await?;
+                                    }
+                                    Action::Exit => return Ok(()),
+                                    Action::Err(rsp) => {
+                                        writer
+                                            .write(format!("Error: {}\r\n", rsp).as_bytes())
+                                            .await?;
+                                        writer.write(prompt(os).as_bytes()).await?;
+                                    }
+                                    Action::Respond(rsp) => {
+                                        writer.write(format!("{}\r\n", rsp).as_bytes()).await?;
+                                        writer.write(prompt(os).as_bytes()).await?;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                Err(e)?;
+                            }
+                        }
+                    }
+                    None => {
+                        Err("serial port closed")?;
+                    }
                 }
-                let action = process_request(&mut state, &req);
-                match action {
-                    Action::None => {
-                        writer.write(prompt(&args.os).as_bytes()).await?;
-                    }
-                    Action::Exit => return Ok(()),
-                    Action::Err(rsp) => {
-                        writer
-                            .write(format!("Error: {}\r\n", rsp).as_bytes())
-                            .await?;
-                        writer.write(prompt(&args.os).as_bytes()).await?;
-                    }
-                    Action::Respond(rsp) => {
-                        writer.write(format!("{}\r\n", rsp).as_bytes()).await?;
-                        writer.write(prompt(&args.os).as_bytes()).await?;
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("error decoding from serial port; error = {:?}", e);
             }
         }
     }
