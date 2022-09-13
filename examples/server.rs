@@ -10,6 +10,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_serial::SerialPortBuilderExt;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, LinesCodec};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Parser)]
 #[clap(author, version, about)]
@@ -69,7 +70,19 @@ async fn main() -> Result<()> {
     let writer = tx_port;
     let reader = FramedRead::new(rx_port, LinesCodec::new());
 
-    listen(reader, writer, args.echo, &args.os).await?;
+    let shutdown_token = CancellationToken::new();
+    let shutdown_token_clone = shutdown_token.clone();
+
+    tokio::spawn(async move {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => println!("received ctrl-c, shutting down"),
+            Err(_) => eprintln!("unable to listen for ctrl-c"),
+        }
+
+        shutdown_token.cancel();
+    });
+
+    listen(reader, writer, args.echo, &args.os, shutdown_token_clone).await?;
 
     Ok(())
 }
@@ -79,6 +92,7 @@ async fn listen<R, W>(
     mut writer: W,
     echo: bool,
     os: &Os,
+    shutdown_token: CancellationToken,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin,
@@ -131,10 +145,11 @@ where
                     }
                 }
             }
+            _ = shutdown_token.cancelled() => {
+                return Ok(());
+            }
         }
     }
-
-    Ok(())
 }
 
 // The prompt for user input.
