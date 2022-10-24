@@ -16,7 +16,7 @@ struct Args {
     #[clap(long, value_enum, default_value_t = ArgLineEnding::CrLf)]
     line_ending: ArgLineEnding,
 
-    #[clap(short, long, default_value_t = 9600)]
+    #[clap(short, long, default_value_t = 115200)]
     baud_rate: u32,
 
     /// Path to serial port device

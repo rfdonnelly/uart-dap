@@ -1,3 +1,5 @@
+use uart_dap::LineEnding;
+
 use std::collections::HashMap;
 use std::str::FromStr;
 
@@ -11,15 +13,20 @@ use tokio_serial::SerialPortBuilderExt;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, LinesCodec};
 use tokio_util::sync::CancellationToken;
+use tracing::info;
+use tracing_subscriber;
 
 #[derive(Parser)]
 #[clap(author, version, about)]
 struct Args {
-    #[clap(short, long, default_value_t = 9600)]
+    #[clap(short, long, default_value_t = 115200)]
     baud_rate: u32,
 
-    #[clap(value_enum, long, default_value_t = Os::VxWorks)]
+    #[clap(value_enum, long, default_value_t = Os::Integrity)]
     os: Os,
+
+    #[clap(long, value_enum, default_value_t = ArgLineEnding::CrLf)]
+    line_ending: ArgLineEnding,
 
     #[clap(long)]
     echo: bool,
@@ -32,6 +39,23 @@ enum Os {
     #[clap(name = "vxworks")]
     VxWorks,
     Integrity,
+}
+
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
+enum ArgLineEnding {
+    Lf,
+    #[clap(name = "crlf")]
+    CrLf,
+}
+
+impl From<ArgLineEnding> for uart_dap::LineEnding {
+    fn from(e: ArgLineEnding) -> Self {
+        match e {
+            ArgLineEnding::Lf => Self::Lf,
+            ArgLineEnding::CrLf => Self::CrLf,
+        }
+    }
 }
 
 type Result<T> = core::result::Result<T, Box<dyn std::error::Error>>;
@@ -62,6 +86,12 @@ enum Action {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let subscriber = tracing_subscriber::fmt()
+        .compact()
+        .with_target(false)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)?;
+
     let args = Args::parse();
 
     let port = tokio_serial::new(args.path, args.baud_rate).open_native_async()?;
@@ -82,8 +112,37 @@ async fn main() -> Result<()> {
         shutdown_token.cancel();
     });
 
-    listen(reader, writer, args.echo, &args.os, shutdown_token_clone).await?;
+    listen(reader, writer, args.echo, args.os, args.line_ending.into(), shutdown_token_clone).await?;
 
+    Ok(())
+}
+
+async fn transmit_line<W, S>(
+    writer: &mut W,
+    line_ending: LineEnding,
+    msg: S,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+    S: AsRef<str>,
+{
+    let msg = format!("{}{}", msg.as_ref(), line_ending);
+    writer.write(msg.as_bytes()).await?;
+    info!(msg, "transmited");
+    Ok(())
+}
+
+async fn transmit<W, S>(
+    writer: &mut W,
+    msg: S,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+    S: AsRef<str>,
+{
+    let msg = msg.as_ref();
+    writer.write(msg.as_bytes()).await?;
+    info!(msg, "transmited");
     Ok(())
 }
 
@@ -91,7 +150,8 @@ async fn listen<R, W>(
     mut reader: FramedRead<R, LinesCodec>,
     mut writer: W,
     echo: bool,
-    os: &Os,
+    os: Os,
+    line_ending: LineEnding,
     shutdown_token: CancellationToken,
 ) -> Result<()>
 where
@@ -100,11 +160,8 @@ where
 {
     let mut state = State::new();
 
-    println!("Modeling {}", os);
-    writer
-        .write(format!("Modeling {}\r\n", os).as_bytes())
-        .await?;
-    writer.write(prompt(os).as_bytes()).await?;
+    transmit_line(&mut writer, line_ending, format!("Modeling {}", os)).await?;
+    transmit(&mut writer, prompt(os)).await?;
 
     loop {
         tokio::select! {
@@ -112,26 +169,24 @@ where
                 match option {
                     Some(result) => {
                         match result {
-                            Ok(req) => {
-                                println!("Received: {}", req);
+                            Ok(msg) => {
+                                info!(msg, "received");
                                 if echo {
-                                    writer.write(format!("{}\r\n", req).as_bytes()).await?;
+                                    transmit_line(&mut writer, line_ending, &msg).await?;
                                 }
-                                let action = process_request(&mut state, &req);
+                                let action = process_request(&mut state, &msg);
                                 match action {
                                     Action::None => {
-                                        writer.write(prompt(os).as_bytes()).await?;
+                                        transmit(&mut writer, prompt(os)).await?;
                                     }
                                     Action::Exit => return Ok(()),
                                     Action::Err(rsp) => {
-                                        writer
-                                            .write(format!("Error: {}\r\n", rsp).as_bytes())
-                                            .await?;
-                                        writer.write(prompt(os).as_bytes()).await?;
+                                        transmit_line(&mut writer, line_ending, format!("error: {}", rsp)).await?;
+                                        transmit(&mut writer, prompt(os)).await?;
                                     }
                                     Action::Respond(rsp) => {
-                                        writer.write(format!("{}\r\n", rsp).as_bytes()).await?;
-                                        writer.write(prompt(os).as_bytes()).await?;
+                                        transmit_line(&mut writer, line_ending, rsp).await?;
+                                        transmit(&mut writer, prompt(os)).await?;
                                     }
                                 }
                             }
@@ -160,7 +215,7 @@ where
 //  [20220131T220813] c0e04004: 00 40 04 a0                                         |.@..|^M
 //
 // The prompt in this example is "[20220131T220813] DEBUG> "
-fn prompt(os: &Os) -> &'static str {
+fn prompt(os: Os) -> &'static str {
     match os {
         Os::VxWorks => "-> ",
         Os::Integrity => "DEBUG> ",
@@ -201,7 +256,7 @@ fn process_request(state: &mut State, req: Request) -> Action {
                 Ok(value) => value,
                 Err(_) => return Action::Err(format!("unable to parse data: {}", addr)),
             };
-            println!("Writing addr:{:#} data:{:#}", addr, data);
+            info!(?addr, ?data, "write");
             state.mem.insert(addr, data);
             Action::None
         }
@@ -214,6 +269,7 @@ fn process_request(state: &mut State, req: Request) -> Action {
                 Ok(value) => value,
                 Err(_) => return Action::Err(format!("unable to parse nbytes: {}", nbytes)),
             };
+            info!(?addr, "read");
             process_read_request(state, addr, nbytes)
         }
         ["mr", "kernel", addr] => {
@@ -221,6 +277,7 @@ fn process_request(state: &mut State, req: Request) -> Action {
                 Ok(value) => value,
                 Err(_) => return Action::Err(format!("unable to parse addr: {}", addr)),
             };
+            info!(?addr, "read");
             process_read_request(state, addr, 16)
         }
         _ => Action::Respond("".to_string()),
