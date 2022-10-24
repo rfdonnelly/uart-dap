@@ -311,6 +311,7 @@ async fn process_line(
                     let dwords = read_bytes.chunks(4).map(|dword_bytes| {
                         dword_bytes
                             .iter()
+                            .rev()
                             .enumerate()
                             .fold(0u32, |dword, (idx, byte)| dword | (byte << (idx * 8)))
                     });
